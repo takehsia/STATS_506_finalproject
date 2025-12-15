@@ -1,8 +1,5 @@
 # The Economic Impact of Open Data Policy: An Empirical Analysis Using State-Level Panel Data
 
-## Overview
-This repository contains the replication code and data for the final project analyzing the causal effect of Open Data Portals on State Real GDP (2010–2022) using a Difference-in-Differences (DiD) framework with Two-Way Fixed Effects.
-
 ## Repository Contents
 
 ### Main Code
