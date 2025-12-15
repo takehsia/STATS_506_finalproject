@@ -37,7 +37,16 @@ execute:
 ---
 
 ```{r setup}
-pacman::p_load(tidyverse, readxl, fixest, modelsummary, stringr, lubridate, scales, kableExtra, patchwork, zoo)
+library(tidyverse)
+library(readxl)
+library(fixest)
+library(modelsummary)
+library(stringr)
+library(lubridate)
+library(scales)
+library(kableExtra)
+library(patchwork)
+library(zoo)
 options(knitr.table.format = "latex")
 
 START_YEAR <- 2010
