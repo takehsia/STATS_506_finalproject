@@ -1,0 +1,423 @@
+---
+title: "The Economic Impact of Open Data Policy: An Empirical Analysis Using State-Level Panel Data"
+author: "Takehisa Satoh(UMID:21622195)"
+date: "2025-12-15"
+format:
+  pdf:
+    documentclass: article
+    geometry:
+      - top=25.4mm
+      - bottom=25.4mm
+      - left=25.4mm
+      - right=25.4mm
+    fontsize: 10pt
+    keep-tex: false
+    fig-pos: 'H'
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{array}
+  - \usepackage{multirow}
+  - \usepackage{wrapfig}
+  - \usepackage{float}
+  - \usepackage{colortbl}
+  - \usepackage{pdflscape}
+  - \usepackage{tabu}
+  - \usepackage{threeparttable}
+  - \usepackage{threeparttablex}
+  - \usepackage{environ}
+  - \usepackage{makecell}
+  - \usepackage{xcolor}
+  - \usepackage{multicol}
+  - \setlength{\parskip}{0pt}
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+pacman::p_load(tidyverse, readxl, fixest, modelsummary, stringr, lubridate, scales, kableExtra, patchwork, zoo)
+options(knitr.table.format = "latex")
+
+START_YEAR <- 2010
+END_YEAR   <- 2022 
+
+# 1. Data Pipeline
+
+# --- A. Portal Data ---
+df_portal <- read_csv("state_open_data.csv", show_col_types = FALSE) %>%
+    left_join(tibble(state_abbr = state.abb, State = state.name), by = "state_abbr") %>%
+    mutate(LaunchYear = as.numeric(launch_year), Treat = if_else(!is.na(LaunchYear), 1, 0)) %>%
+    filter(!is.na(State)) %>% select(State, LaunchYear, Treat)
+
+# --- B. GDP Data  ---
+df_gdp_raw <- read_csv("SAGDP1__ALL_AREAS_1997_2024.csv",col_types = cols(.default = "c"), show_col_types = FALSE)
+df_gdp <- df_gdp_raw %>%
+  filter(LineCode %in% c("1", "2", "3")) %>%
+  pivot_longer(cols = matches("^\\d{4}$"), names_to = "Year", values_to = "Value") %>%
+  mutate(Year = as.numeric(Year), Value = as.numeric(Value),
+         Type = case_when(
+           LineCode == "1" ~ "RealGDP", 
+           LineCode == "2" ~ "GDP_Index",
+           LineCode == "3" ~ "NominalGDP"
+           )) %>%
+  filter(Year >= START_YEAR, Year <= END_YEAR) %>%
+  select(GeoFIPS, GeoName, Year, Type, Value) %>%
+  pivot_wider(names_from = Type, values_from = Value) %>%
+  filter(GeoFIPS != "00000")
+
+# --- C. Labor Data ---
+acs_years <- c(2010:2019, 2021:2022) 
+# data for 2020 are missing.
+#acs_files <- sprintf("ACSDT1Y%d.B01003-Data.csv", acs_years)
+acs_files <- c("ACSDT1Y2010.B01003-Data.csv","ACSDT1Y2011.B01003-Data.csv",
+               "ACSDT1Y2012.B01003-Data.csv","ACSDT1Y2013.B01003-Data.csv",
+               "ACSDT1Y2014.B01003-Data.csv","ACSDT1Y2015.B01003-Data.csv",
+               "ACSDT1Y2016.B01003-Data.csv","ACSDT1Y2017.B01003-Data.csv",
+               "ACSDT1Y2018.B01003-Data.csv","ACSDT1Y2019.B01003-Data.csv",
+               "ACSDT1Y2021.B01003-Data.csv","ACSDT1Y2022.B01003-Data.csv"
+               )
+# ------------------------------------------------------------------------------
+# [Function]: read_acs_csv
+#   Reads U.S. Census Bureau ACS (Labor Data) CSV files.
+#   To handle column shifts across different years, it explicitly selects the column 
+#   named "B01003_001E".
+# [Input]: 
+#   filename (String): Path to the CSV file.
+#   year (Numeric): The corresponding year for the file.
+# [Output]: 
+#   DataFrame: Contains State name, Labor force (L_it), and Year. 
+#              Returns NULL if the file does not exist.
+# ------------------------------------------------------------------------------
+read_acs_csv <- function(filename, year) {
+  df <- read_csv(filename, show_col_types = FALSE, col_types = cols(.default = "c"))
+  df %>% 
+    slice(-1) %>% 
+    select(State = NAME, L_it = B01003_001E) %>%
+    mutate(L_it = as.numeric(L_it), Year = year) %>%
+    filter(!is.na(L_it))
+}
+
+df_labor <- map2(acs_files, acs_years, read_acs_csv) %>% bind_rows()
+
+# --- D. Capital Stock Estimation ---
+# Method 1: GDP Proportion Approach 
+national_k_index <- read_excel("Section1All_xls.xlsx", sheet = "FAAt102-A", skip = 7) %>%
+  rename(Line = 1) %>% filter(Line == 2) %>% 
+  pivot_longer(cols = matches("^\\d{4}$"), names_to = "Year", values_to = "National_K_Idx") %>%
+  mutate(Year = as.numeric(Year), National_K_Idx = as.numeric(National_K_Idx))
+
+national_gdp_real <- df_gdp_raw %>%
+  filter(GeoFIPS == "00000", LineCode == "1") %>% # Line 1 = Real GDP
+  pivot_longer(cols = matches("^\\d{4}$"), names_to = "Year", values_to = "National_GDP_Real") %>%
+  mutate(Year = as.numeric(Year), National_GDP_Real = as.numeric(National_GDP_Real)) %>%
+  select(Year, National_GDP_Real)
+
+df_k_Prop <- df_gdp %>%
+  select(GeoFIPS, Year, RealGDP) %>% # Use RealGDP for share calculation
+  left_join(national_k_index, by = "Year") %>%
+  left_join(national_gdp_real, by = "Year") %>%
+  mutate(K_it_Prop = National_K_Idx * (RealGDP / National_GDP_Real)) %>%
+  select(GeoFIPS, Year, K_it_Prop)
+
+# Method 2: PIM Approach
+df_ind_raw <- read_csv("SAGDP2__ALL_AREAS_1997_2024.csv",col_types = cols(.default = "c"), show_col_types = FALSE)
+df_bea_ind <- df_ind_raw %>% filter(GeoFIPS != "00000") %>%
+  pivot_longer(cols = matches("^\\d{4}$"), names_to = "Year", values_to = "GDP") %>%
+  mutate(Year = as.numeric(Year), GDP = as.numeric(GDP),
+         Match_Key = str_to_lower(Description) %>% str_remove_all("[[:punct:]]") %>% str_squish()) %>%
+  filter(Year >= START_YEAR, Year <= END_YEAR)
+
+df_info_share <- df_ind_raw %>%
+  filter(Description == "Information" | Description == "All industry total") %>%
+  pivot_longer(cols = matches("^\\d{4}$"), names_to = "Year", values_to = "Value") %>%
+  mutate(Year = as.numeric(Year), Value = as.numeric(Value)) %>%
+  select(GeoFIPS, Year, Description, Value) %>%
+  pivot_wider(names_from = Description, values_from = Value) %>%
+  rename(Total = `All industry total`) %>% rename_with(~"Info", matches("Information")) %>%
+  mutate(A_it = Info / Total) %>% select(GeoFIPS, Year, A_it)
+
+aces_files_check <- c("table4b_2010.xlsx","table4b_2011.xlsx",
+                      "table4b_2012.xlsx","table4b_2013.xlsx",
+                      "table4b_2014.xlsx","table4b_2015.xlsx",
+                      "table4b_2016.xlsx","table4b_2017.xlsx",
+                      "table4b_2018.xlsx","table4b_2019.xlsx",
+                      "table4b_2020.xlsx","table4b_2021.xlsx",
+                      "table4a_2022.xlsx")
+  
+aces_map <- tibble(Year = 2010:2022, Filename = aces_files_check)
+
+# ------------------------------------------------------------------------------
+# [Function]: read_aces
+#   Reads ACES Excel files for capital expenditures by industry.
+# [Input]: File path, Year. [Output]: Tibble with Match_Key, CapEx.
+# ------------------------------------------------------------------------------
+read_aces <- function(f, y) {
+  read_excel(f, skip = 3, col_names = FALSE) %>% select(1,2,3) %>%
+    rename(Code=1, Name=2, CapEx=3) %>%
+    mutate(Year=y, CapEx = as.numeric(CapEx), 
+           Match_Key = str_to_lower(Name) %>% str_remove_all("[[:punct:]]") %>% str_squish()) %>%
+    filter(!is.na(CapEx))
+}
+df_aces <- map2(aces_map$Filename, aces_map$Year, read_aces) %>% bind_rows()
+
+
+us_ind_gdp <- df_bea_ind %>% group_by(Year, Match_Key) %>% summarise(US_Ind_GDP = sum(GDP, na.rm=T))
+  
+# Allocate National Investment to States
+df_pim_calc <- df_bea_ind %>%
+  inner_join(df_aces, by = c("Year", "Match_Key")) %>%
+  left_join(us_ind_gdp, by = c("Year", "Match_Key")) %>%
+  mutate(Allocated_I = (GDP / US_Ind_GDP) * CapEx) %>%
+  group_by(GeoFIPS, Year) %>% 
+  summarise(I_it = sum(Allocated_I, na.rm=T)) %>% 
+  ungroup()
+  
+# PIM Calculation
+delta <- 0.06; g <- 0.02
+  
+df_k_pim <- df_pim_calc %>%
+  arrange(GeoFIPS, Year) %>%
+  group_by(GeoFIPS) %>%
+  mutate(
+    # initial stock for first year
+    pim_flow = if_else(row_number() == 1, I_it / (delta + g), I_it),
+    # Accumulate: K_t = (1-delta)*K_{t-1} + I_t
+    K_it_PIM = accumulate(pim_flow, ~ (1 - delta) * .x + .y)
+    ) %>%
+    ungroup() %>%
+    select(GeoFIPS, Year, K_it_PIM)
+
+# --- E. Final Merge ---
+final_df <- df_gdp %>%
+  left_join(df_portal, by = c("GeoName" = "State")) %>%
+  left_join(df_k_Prop, by = c("GeoFIPS", "Year")) %>%
+  left_join(df_k_pim, by = c("GeoFIPS", "Year")) %>%
+  left_join(df_info_share, by = c("GeoFIPS", "Year")) %>%
+  inner_join(df_labor, by = c("GeoName" = "State", "Year")) %>%
+  filter(!is.na(LaunchYear) | Treat == 0) %>%
+  mutate(
+    Post = if_else(Treat == 1 & Year >= LaunchYear, 1, 0),
+    Did_Term = Treat * Post,
+    log_Y = log(RealGDP), 
+    log_Index = log(GDP_Index),
+    log_L = log(L_it),
+    log_K_Prop = log(K_it_Prop), 
+    log_K_PIM = log(K_it_PIM)
+  ) %>%
+  filter(is.finite(log_Y), is.finite(log_Index), is.finite(log_L)) %>%
+  arrange(GeoFIPS, Year) %>% group_by(GeoFIPS) %>%
+  mutate(Did_Lag1 = lag(Did_Term, 1), Did_Lag2 = lag(Did_Term, 2)) %>% ungroup()
+```
+# 1. Introduction
+## Background and Motivation
+According to basic economic theory, information asymmetry is a primary cause of market failure (Stiglitz, 2000). Governments possess vast amounts of data that, if made accessible, could reduce these asymmetries and foster economic activities. In recent years, many U.S. state governments have implemented "Open Data Portals"—platforms designed to lower transaction costs for businesses and citizens. However, while the theoretical benefits are clear, empirical evidence quantifying the macroeconomic impact of these specific policies remains scarce.
+
+## Project Goal
+This project aims to quantify the causal effect of implementing a state-level open data portal on the state's Real Gross Domestic Product (GDP). Specifically, we test whether the launch of such portals leads to a statistically significant increase in economic output.
+
+## Literature Review
+Existing literature emphasizes the potential of Open Government Data (OGD). Janssen et al. (2012) argue that OGD creates value by improving transparency and stimulating innovation. Ubaldi (2013) highlights the need for empirical frameworks to measure these impacts beyond qualitative case studies. This paper contributes to the literature by applying a rigorous production function estimation using panel data from 50 U.S. states (2010–2022).
+
+# 2. Method
+
+### Dataset Description
+The analysis utilizes a panel dataset covering 50 U.S. states from 2010 to 2022. 
+
+
+**GDP (**$Y$): Real GDP obtained from the Bureau of Economic Analysis (BEA). 
+
+**Labor (**$L$): Population estimates from the U.S. Census Bureau 1-year estimates. 
+
+**Policy (**$D$): Manually collected launch dates of open data portals based on domain registration dates.
+
+### Methodology and Capital Estimation
+Due to the lack of state-level capital stock data, we estimate it using two approaches.
+### 1. GDP Proportional Approach
+Assumes capital is proportional to the state's share of national GDP. We use the National Chain-Type Quantity Index for Fixed Assets ($K_{US,t}^{Index}$) which is the proxy of the real capital stock, and allocate it based on State Real GDP shares.
+$$K_{it}^{Prop} = K_{US,t}^{Index} \times \frac{Y_{it}^{Real}}{Y_{US,t}^{Real}}$$
+$$
+\text{where } i: \text{state, } t: \text{year}
+$$
+
+### 2. PIM Approach
+We employ the Perpetual Inventory Method (PIM) using Census ACES (Annual Capital Expenditures Survey) data. Since ACES only provides national-level industry investment ($I_{US,j,t}^{ACES}$), we first estimate state-level investment ($I_{it}$) by allocating the national values based on each state's industry GDP share.
+**Step 1: Estimate State Investment** $$ I_{it} = \sum_{j=1}^{J} \left( \frac{Y_{ijt}}{Y_{US,j,t}} \times I_{US,j,t}^{ACES} \right) $$
+$$
+\text{where } j: \text{industry}
+$$
+**Step 2: Accumulate Capital Stock** $$ K_{it}^{PIM} = (1 - \delta) K_{i,t-1}^{PIM} + I_{it} $$
+
+The initial stock ($K_{i,0}$) is estimated assuming a steady state growth ($g=0.02$): $$ K_{i,0} = \frac{I_{i,0}}{\delta + g} $$
+The value $g=0.02$ represents the long-term real potential economic growth rate of the U.S. economy.
+
+### Model Setup 
+We estimate the effects using a difference-in-differences (DiD) approach with two-way fixed effects, which controls for both state-specific fixed effects and time fixed effects.
+
+**Model 1. Cobb-Douglas (GDP Proportional Capital)** This model uses the proportional capital stock. It can have the potential endogeneity bias (circular logic) since the variable $K_{it}^{Prop}$ is derived from output.
+
+$$ \ln(Y_{it}) = \beta_0 + \delta D_{it} + \alpha \ln(K_{it}^{Prop}) + \beta \ln(L_{it}) + \gamma A_{it} + \mu_i + \lambda_t + \epsilon_{it} $$
+
+\begin{multicols}{2}
+\begin{itemize}
+\item $Y_{it}$: Real GDP
+\item $D_{it}$: Policy dummy
+\item $K_{it}^{Prop}$: Capital (Proportional)
+\item $L_{it}$: Labor force
+\item $A_{it}$: Info industry share
+\item $\mu_i, \lambda_t$: Fixed Effects
+\end{itemize}
+\end{multicols}
+
+**Model 2: Cobb-Douglas (PIM Capital)** This model uses the PIM-estimated capital stock. By decoupling capital estimation from current output using investment data, this model addresses the endogeneity issue of the model 1. $$ \ln(Y_{it}) = \beta_0 + \delta D_{it} + \alpha \ln(K_{it}^{PIM}) + \beta \ln(L_{it}) + \gamma A_{it} + \mu_i + \lambda_t + \epsilon_{it} $$
+
+**Model 3: Lagged PIM Model** This model includes 1-year and 2-year lags of the policy variable ($D_{it-1}, D_{it-2}$) alongside PIM capital. It accounts for the time required for open data adoption to diffuse and translate into measurable economic activity. $$ \ln(Y_{it}) = \beta_0 + \delta_0 D_{it} + \delta_1 D_{it-1} + \delta_2 D_{it-2} + \alpha \ln(K_{it}^{PIM}) + \gamma A_{it} + \mu_i + \lambda_t + \epsilon_{it} $$
+
+**Model 4: Index Model** This model uses the Chain-type Quantity Index as the dependent variable instead of Real GDP. This checks robustness against specific price deflator biases in the Real GDP measure. $$ \ln(\text{Index}_{it}) = \beta_0 + \delta D_{it} + \alpha \ln(K_{it}^{PIM}) + \beta \ln(L_{it}) + \gamma A_{it} + \mu_i + \lambda_t + \epsilon_{it} $$
+
+**Model 5: Reduced Form** This model excludes capital stock entirely to observe the raw correlation between labor, technology, and the policy variable. Alghouth this model is not align with the Cobb-Douglas production function, it prevents biases from capital estimation errors from affecting the policy coefficient. $$ \ln(Y_{it}) = \beta_0 + \delta D_{it} + \beta \ln(L_{it}) + \gamma A_{it} + \mu_i + \lambda_t + \epsilon_{it} $$
+
+# 3. Results
+Table 1 shows the regression results.
+\vspace{1em}
+```{r regression_table}
+#| tbl-cap: "Regression Results"
+
+m1 <- feols(log_Y ~ Did_Term + log_K_Prop + log_L + A_it | GeoFIPS + Year, data = final_df, cluster = "GeoFIPS")
+m2 <- feols(log_Y ~ Did_Term + log_K_PIM + log_L + A_it | GeoFIPS + Year, data = final_df, cluster = "GeoFIPS")
+m3 <- feols(log_Y ~ Did_Term + Did_Lag1 + Did_Lag2 + log_K_PIM + log_L + A_it | GeoFIPS + Year, data = final_df, cluster = "GeoFIPS")
+m4 <- feols(log_Index ~ Did_Term + log_K_PIM + log_L + A_it | GeoFIPS + Year, data = final_df, cluster = "GeoFIPS")
+m5 <- feols(log_Y ~ Did_Term + log_L + A_it | GeoFIPS + Year, data = final_df, cluster = "GeoFIPS")
+  
+models_list <- list("1. Prop" = m1, "2. PIM" = m2, "3. Lag" = m3, "4. Index" = m4, "5. Reduce" = m5)
+
+rows <- tibble(
+  term = "Capital Method",
+  "1. Prop" = "Proportional",
+  "2. PIM" = "PIM",
+  "3. Lag" = "PIM",
+  "4. Index" = "PIM", 
+  "5. Reduce" ="None",
+) %>% select(any_of(c("term", names(models_list))))
+
+modelsummary(
+  models_list,
+  stars = c('*' = .1, '**' = .05, '***' = .01),
+  gof_map = c("nobs", "r.squared", "adj.r.squared"),
+  coef_map = c("Did_Term" = "Policy (DiD)", 
+               "Did_Lag1" = "Policy Lag-1", 
+               "Did_Lag2" = "Policy Lag-2",
+               "log_K_Prop" = "log(K) Prop", 
+               "log_K_PIM" = "log(K) PIM", 
+               "log_L" = "log(L)", 
+               "A_it" = "Info Share"),
+  add_rows = rows,
+  output = "kableExtra",
+  escape = FALSE 
+) %>%
+  kable_styling(latex_options = c("hold_position", "scale_down"))
+```
+**Model 1: Cobb-Douglas (GDP Proportional Capital)**
+The coefficient for $\ln(K_{it}^{Prop})$ is typically near 1.0, and $R^2$ is 1.0. This shows severe endogeneity, as capital is mechanically derived from output, rendering this approach invalid.
+\vspace{1em}
+
+**Model 2: Cobb-Douglas (PIM Capital)**
+Using PIM capital, the elasticity ($\ln(K_{it}^{PIM})$) is roughly 0.557. This suggests the PIM approach mitigates bias included in the Model 1. However, the Policy coefficient is not statistically significant ($p > 0.1$), indicating no immediate effects on Stats' GDP.
+\vspace{1em}
+
+**Model 3: Lagged PIM Model**
+Neither the immediate policy variable nor its 1-year/2-year lags are statistically significant. The economic benefits of open data do not appear to materialize in aggregate GDP even after delays.
+\vspace{1em}
+
+**Model 4: Index Model**
+Results using the Quantity Index are consistent with Model 2, confirming that price deflators are not driving the null result.
+\vspace{1em}
+
+**Model 5: Reduced Form**
+Without capital, Labor is positive and significant. However, the Policy variable remains statistically insignificant. This confirms that the null result is robust to capital estimation methods.
+
+
+# 4. Conclusion
+This study investigated the impact of open data portals on state-level Real GDP. Using a rigorous PIM approach to estimate capital stock, we found no statistically significant evidence that these policies increase aggregate economic output. While open data fosters transparency, its macroeconomic impact appears limited or too micro-level to be detected in state GDP.
+
+\newpage
+# References
+My source code in repository: https://github.com/takehsia/STATS_506_finalproject.git
+\vspace{1em}
+
+Congressional Budget Office. (2024). *The Budget and Economic Outlook: 2024 to 2034*. Washington, D.C.
+\vspace{1em}
+
+Janssen, M., Charalabidis, Y., & Zuiderwijk, A. (2012). Benefits, Adoption Barriers and Myths of Open Data and Open Government. *Information Systems Management*, 29(4), 258-268.
+\vspace{1em}
+
+OECD. (2009). *Measuring Capital: OECD Manual 2nd Edition*. OECD Publishing.
+\vspace{1em}
+
+Song, J. (2024). *R ni yoru data bunseki nyumon* [Introduction to Data Analysis with R]. Web book. Available at https://www.jaysong.net/RBook/
+\vspace{1em}
+
+Stiglitz, J. E. (2000). The Contributions of the Economics of Information to Twentieth Century Economics. *The Quarterly Journal of Economics*, 115(4), 1441-1478.
+\vspace{1em}
+
+Ubaldi, B. (2013). Open Government Data: Towards Empirical Analysis of Open Government Data Initiatives. *OECD Working Papers on Public Governance*, No. 22.
+\vspace{1em}
+
+Wickham, H., Çetinkaya-Rundel, M., & Grolemund, G. (2023). *R for Data Science: Import, Tidy, Transform, Visualize, and Model Data* (2nd ed.). O'Reilly Media. Available at https://r4ds.hadley.nz/
+\vspace{1em}
+
+Watal, H. (n.d.). Rua: R usage notes. Retrieved December 15, 2025, from https://heavywatal.github.io/rstats/intro.html.
+
+
+
+\newpage
+
+# Appendix
+
+```{r appendix_plots}
+#| fig-width: 20
+#| fig-height: 30
+#| fig-align: center
+#| echo: false
+
+my_theme <- theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 20),
+    legend.title = element_blank(),
+    legend.key.size = unit(0.5, "cm"),
+    plot.title = element_text(size = 20, face = "bold"),
+    axis.title = element_text(size = 20),
+    axis.text = element_text(size = 20)
+  )
+
+# 1. Real GDP
+p1 <- ggplot(final_df, aes(x = Year, y = RealGDP, color = GeoName)) + geom_line(alpha = 0.8) +
+  labs(title = "Figure A1: Real GDP Trends (2010-2022)", y = "GDP", x = "") +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) + my_theme
+
+# 2. Labor Force
+p2 <- ggplot(final_df, aes(x = Year, y = L_it, color = GeoName)) + geom_line(alpha = 0.8) +
+  labs(title = "Figure A2: Labor Force (Population)", y = "Populations", x = "") +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) + my_theme
+
+# 3. Capital (Prop)
+p3 <- ggplot(final_df, aes(x = Year, y = K_it_Prop, color = GeoName)) + geom_line(alpha = 0.8) +
+  labs(title = "Figure A3: Capital Stock (Proportional)", y = "Capital Stock", x = "") +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) + my_theme
+
+# 4. Capital (PIM)
+if("K_it_PIM" %in% names(final_df)) {
+  p4 <- ggplot(final_df, aes(x = Year, y = K_it_PIM, color = GeoName)) + geom_line(alpha = 0.8) +
+    labs(title = "Figure A4: Capital Stock (PIM)", y = "Capital Stock", x = "") +
+    scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) + my_theme
+} else { p4 <- ggplot() + theme_void() }
+
+p1 / p2 / p3 / p4 + plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom") & guides(color = guide_legend(ncol = 10, override.aes = list(size = 5)))
+```
+
+
+
+
