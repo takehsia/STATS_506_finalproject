@@ -1,7 +1,5 @@
 # The Economic Impact of Open Data Policy: An Empirical Analysis Using State-Level Panel Data
 
-## Repository Contents
-
 ### Main Code
 *   `2512014_finalproject_Takehisa.qmd`
 *   `STATS_506_finalproject.Rproj`
