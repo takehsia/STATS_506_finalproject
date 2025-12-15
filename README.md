@@ -43,7 +43,6 @@
 *   `table4a_2022.xlsx`
 
 ### R Packages Used
-*   **pacman**
 *   **tidyverse**
 *   **readxl**
 *   **fixest**
