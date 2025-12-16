@@ -221,7 +221,7 @@ final_df <- df_gdp %>%
 ```
 # 1. Introduction
 ## Background and Motivation
-According to basic economic theory, information asymmetry is a primary cause of market failure (Stiglitz, 2000). Governments possess vast amounts of data that, if made accessible, could reduce these asymmetries and foster economic activities. In recent years, many U.S. state governments have implemented "Open Data Portals"—platforms designed to lower transaction costs for businesses and citizens. However, while the theoretical benefits are clear, empirical evidence quantifying the macroeconomic impact of these specific policies remains scarce.
+According to basic economic theory, information asymmetry is one of major causes of market failure (Stiglitz, 2000). Governments possess vast amounts of data that, if made accessible, could reduce these asymmetries and foster economic activities. In recent years, many U.S. state governments have implemented "Open Data Portals"—platforms designed to lower transaction costs for businesses and citizens. However, empirical evidence quantifying the macroeconomic impact of these specific policies remains scarce.
 
 ## Project Goal
 This project aims to quantify the causal effect of implementing a state-level open data portal on the state's Real Gross Domestic Product (GDP). Specifically, we test whether the launch of such portals leads to a statistically significant increase in economic output.
